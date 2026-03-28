@@ -1,0 +1,42 @@
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# ── Virtual environment ───────────────────────────────────────
+whisper-env/
+venv/
+env/
+
+# ── Secret files — NEVER commit these ────────────────────────
+.env
+credentials.json
+token.json
+
+# ── Database ──────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── .NET / ASP.NET ────────────────────────────────────────────
+TodoApi/bin/
+TodoApi/obj/
+TodoApi/*.db
+TodoApi/appsettings.Development.json
+
+# ── OS files ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs ─────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Whisper model cache ───────────────────────────────────────
+~/.cache/whisper/
