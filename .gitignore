@@ -17,6 +17,8 @@ env/
 .env
 credentials.json
 token.json
+**/token.json
+**/credentials.json
 
 # ── Database ──────────────────────────────────────────────────
 *.db

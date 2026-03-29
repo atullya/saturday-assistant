@@ -2,8 +2,8 @@ import discord
 from discord import app_commands
 import ollama
 import os
+import re
 import socket
-import sys
 import time
 import asyncio
 from dotenv import load_dotenv
@@ -27,20 +27,25 @@ from services.portfolio.portfolio_service import (
     get_portfolio_status, get_portfolio_links,
     ask_portfolio_question, get_specific_portfolio
 )
+from services.calendar.calendar_service import (
+    get_upcoming_events, get_today_events,
+    add_event, delete_event, format_events
+)
 
 load_dotenv()
 
-PORTFOLIOS      = ["personal", "startup"]
-DISCORD_TOKEN   = os.getenv("DISCORD_TOKEN")
-OLLAMA_MODEL    = "llama3.2:1b"
-ASSISTANT_NAME  = "Saturday"
+PORTFOLIOS     = ["personal", "startup"]
+DISCORD_TOKEN  = os.getenv("DISCORD_TOKEN")
+OLLAMA_MODEL   = "llama3.2:1b"
+ASSISTANT_NAME = "Saturday"
 
-GMAIL_CMD       = "!gmail"
-TODO_CMD        = "!todo"
-SATURDAY_CMD    = "!saturday"
-SATURDAY_SHORT  = "!s"
-PORTFOLIO_CMD   = "!portfolio"
-RENT_CMD        = "!rent"
+GMAIL_CMD      = "!gmail"
+TODO_CMD       = "!todo"
+SATURDAY_CMD   = "!saturday"
+SATURDAY_SHORT = "!s"
+PORTFOLIO_CMD  = "!portfolio"
+RENT_CMD       = "!rent"
+CAL_CMD        = "!cal"
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -52,7 +57,7 @@ async def run_blocking(func, *args):
     return await loop.run_in_executor(None, func, *args)
 
 # ══════════════════════════════════════════════════════════════
-# MODAL
+# MODALS
 # ══════════════════════════════════════════════════════════════
 class TodoModal(discord.ui.Modal, title="Add Todo"):
     def __init__(self):
@@ -77,22 +82,18 @@ class TodoModal(discord.ui.Modal, title="Add Todo"):
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-
         title = self.children[0].value.strip()
         print(f"DEBUG modal callback triggered, title='{title}'")
-
         if not title:
             await interaction.followup.send("❌ Title cannot be empty", ephemeral=True)
             return
-
         result = await run_blocking(add_todo, title)
         print(f"DEBUG add_todo result: {result}")
-
         if isinstance(result, dict) and "error" in result:
             await interaction.followup.send(f"❌ API error: {result['error']}", ephemeral=True)
             return
-
         await interaction.followup.send(f"✅ Added! `#{result['id']}` — {result['title']}", ephemeral=True)
+
 
 class TestModal(discord.ui.Modal, title="Test Modal"):
     def __init__(self):
@@ -104,6 +105,7 @@ class TestModal(discord.ui.Modal, title="Test Modal"):
         print(f"DEBUG TestModal got: '{value}'")
         await interaction.response.send_message(f"✅ Got: {value}", ephemeral=True)
 
+
 class AddTodoView(discord.ui.View):
     @discord.ui.button(label="Open Todo Modal", style=discord.ButtonStyle.primary)
     async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -114,6 +116,8 @@ class AddTodoView(discord.ui.View):
 # SLASH COMMANDS
 # ══════════════════════════════════════════════════════════════
 tree = discord.app_commands.CommandTree(client)
+
+# ── Todo slash group ──────────────────────────────────────────
 todo_group = discord.app_commands.Group(name="todo", description="Todo commands")
 
 @todo_group.command(name="list")
@@ -171,8 +175,6 @@ async def todo_modal(interaction: discord.Interaction):
 @todo_group.command(name="test")
 async def todo_test(interaction: discord.Interaction):
     await interaction.response.send_modal(TestModal())
-async def todo_test(interaction: discord.Interaction):
-    await interaction.response.send_modal(TestModal())
 
 @todo_group.command(name="done")
 async def todo_done(interaction: discord.Interaction, todo_id: str):
@@ -208,6 +210,218 @@ async def todo_clear(interaction: discord.Interaction):
     await interaction.followup.send(f"🧹 {result['message']}")
 
 tree.add_command(todo_group)
+
+# ── Calendar slash group ──────────────────────────────────────
+cal_group = discord.app_commands.Group(name="cal", description="Calendar commands")
+
+@cal_group.command(name="today")
+async def cal_today(interaction: discord.Interaction):
+    await interaction.response.defer()
+    events = await run_blocking(get_today_events)
+    if isinstance(events, dict) and "error" in events:
+        await interaction.followup.send(f"❌ {events['error']}", ephemeral=True)
+        return
+    await interaction.followup.send(f"📅 **Today's Events:**\n{format_events(events)}")
+
+@cal_group.command(name="upcoming")
+async def cal_upcoming(interaction: discord.Interaction):
+    await interaction.response.defer()
+    events = await run_blocking(get_upcoming_events)
+    if isinstance(events, dict) and "error" in events:
+        await interaction.followup.send(f"❌ {events['error']}", ephemeral=True)
+        return
+    await interaction.followup.send(f"📅 **Upcoming Events:**\n{format_events(events)}")
+
+@cal_group.command(name="add")
+@app_commands.describe(
+    title="Event title",
+    date="today / tomorrow / YYYY-MM-DD",
+    time="24h time e.g. 14:30 (optional)",
+    duration="Duration in minutes (default 60)",
+    description="Optional description"
+)
+async def cal_add(
+    interaction: discord.Interaction,
+    title: str,
+    date: str,
+    time: str | None = None,
+    duration: int = 60,
+    description: str = ""
+):
+    await interaction.response.defer()
+    result = await run_blocking(add_event, title, date, time, duration, description)
+    if isinstance(result, dict) and "error" in result:
+        await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
+        return
+    await interaction.followup.send(
+        f"✅ **{result['summary']}** created!\n🔗 {result.get('htmlLink', 'N/A')}"
+    )
+
+@cal_group.command(name="delete")
+@app_commands.describe(event_id="Event ID from /cal today or /cal upcoming")
+async def cal_delete(interaction: discord.Interaction, event_id: str):
+    await interaction.response.defer()
+    result = await run_blocking(delete_event, event_id)
+    if isinstance(result, dict) and "error" in result:
+        await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
+        return
+    await interaction.followup.send(f"🗑️ {result['message']}")
+
+tree.add_command(cal_group)
+
+
+# ══════════════════════════════════════════════════════════════
+# PREFIX COMMAND HANDLERS
+# ══════════════════════════════════════════════════════════════
+async def handle_calendar(message, text):
+    parts   = text.split(" ", 2)
+    command = parts[1].lower() if len(parts) > 1 else "help"
+
+    if command == "today":
+        events = await run_blocking(get_today_events)
+        await message.reply(f"📅 **Today's Events:**\n{format_events(events)}")
+
+    elif command == "upcoming":
+        events = await run_blocking(get_upcoming_events)
+        await message.reply(f"📅 **Upcoming Events:**\n{format_events(events)}")
+
+    elif command == "add":
+        raw    = text[len("!cal add"):].strip()
+        tokens = raw.split(" ", 2)
+
+        if len(tokens) < 2:
+            await message.reply(
+                "❌ Usage:\n"
+                "`!cal add today 14:30 Team Meeting`\n"
+                "`!cal add tomorrow Doctor Appointment`\n"
+                "`!cal add 2026-04-01 10:00 Interview`"
+            )
+            return
+
+        date_str = tokens[0]
+
+        if len(tokens) >= 3 and re.match(r'^\d{1,2}:\d{2}$', tokens[1]):
+            time_str = tokens[1]
+            title    = tokens[2]
+        else:
+            time_str = None
+            title    = " ".join(tokens[1:])
+
+        print(f"DEBUG cal add: date='{date_str}' time='{time_str}' title='{title}'")
+
+        result = await run_blocking(add_event, title, date_str, time_str)
+        if isinstance(result, dict) and "error" in result:
+            await message.reply(f"❌ {result['error']}")
+            return
+        await message.reply(f"✅ **{result['summary']}** created!\n🔗 {result.get('htmlLink', 'N/A')}")
+
+    elif command == "delete":
+        if len(parts) < 3:
+            await message.reply("❌ Usage: `!cal delete <event_id>`")
+            return
+        result = await run_blocking(delete_event, parts[2])
+        if isinstance(result, dict) and "error" in result:
+            await message.reply(f"❌ {result['error']}")
+            return
+        await message.reply(f"🗑️ {result['message']}")
+
+    else:
+        await message.reply(
+            f"📅 **Saturday Calendar Commands:**\n\n"
+            f"`!cal today`                           — today's events\n"
+            f"`!cal upcoming`                        — next 5 events\n"
+            f"`!cal add <date> <time> <title>`       — create event\n"
+            f"`!cal delete <event_id>`               — delete event\n\n"
+            f"**Examples:**\n"
+            f"`!cal add today 14:30 Team Meeting`\n"
+            f"`!cal add tomorrow Doctor Appointment`\n"
+            f"`!cal add 2026-04-01 10:00 Interview`"
+        )
+
+
+async def handle_todo(message, text):
+    parts   = text.split(" ", 2)
+    command = parts[1].lower() if len(parts) > 1 else "help"
+
+    if command == "list":
+        todos = await run_blocking(get_all_todos)
+        if isinstance(todos, dict) and "error" in todos:
+            await message.reply(f"❌ API error: {todos['error']}")
+            return
+        await message.reply(f"📋 **All Todos:**\n{format_todos(todos)}")
+
+    elif command == "pending":
+        todos = await run_blocking(get_pending_todos)
+        if isinstance(todos, dict) and "error" in todos:
+            await message.reply(f"❌ API error: {todos['error']}")
+            return
+        await message.reply(f"⏳ **Pending Todos:**\n{format_todos(todos)}")
+
+    elif command == "completed":
+        todos = await run_blocking(get_completed_todos)
+        if isinstance(todos, dict) and "error" in todos:
+            await message.reply(f"❌ API error: {todos['error']}")
+            return
+        await message.reply(f"✅ **Completed Todos:**\n{format_todos(todos)}")
+
+    elif command == "add":
+        if len(parts) >= 3 and parts[2].strip().lower() == "modal":
+            await message.reply("📝 Click the button to add a todo:", view=AddTodoView())
+            return
+        if len(parts) < 3 or not parts[2].strip():
+            await message.reply(
+                "📝 To add a todo via modal, click the button below (or use `!todo add <title>`).",
+                view=AddTodoView()
+            )
+            return
+        result = await run_blocking(add_todo, parts[2])
+        if isinstance(result, dict) and "error" in result:
+            await message.reply(f"❌ API error: {result['error']}")
+            return
+        await message.reply(f"✅ Added! `#{result['id']}` — {result['title']}")
+
+    elif command == "done":
+        if len(parts) < 3:
+            await message.reply("❌ Usage: `!todo done <id>`")
+            return
+        result = await run_blocking(mark_done, parts[2])
+        if isinstance(result, dict) and "error" in result:
+            await message.reply(f"❌ {result['error']}")
+            return
+        await message.reply(f"✅ Done! `#{result['id']}` — {result['title']}")
+
+    elif command == "undone":
+        if len(parts) < 3:
+            await message.reply("❌ Usage: `!todo undone <id>`")
+            return
+        result = await run_blocking(mark_undone, parts[2])
+        if isinstance(result, dict) and "error" in result:
+            await message.reply(f"❌ {result['error']}")
+            return
+        await message.reply(f"↩️ Undone! `#{result['id']}` — {result['title']}")
+
+    elif command == "delete":
+        if len(parts) < 3:
+            await message.reply("❌ Usage: `!todo delete <id>`")
+            return
+        result = await run_blocking(delete_todo, parts[2])
+        if isinstance(result, dict) and "error" in result:
+            await message.reply(f"❌ {result['error']}")
+            return
+        await message.reply(f"🗑️ {result['message']}")
+
+    elif command == "clear":
+        result = await run_blocking(clear_completed)
+        await message.reply(f"🧹 {result['message']}")
+
+    else:
+        await message.reply(
+            f"📋 **Todo Commands:**\n"
+            f"`!todo list` `!todo pending` `!todo completed`\n"
+            f"`!todo add <title>` `!todo done <id>`\n"
+            f"`!todo undone <id>` `!todo delete <id>` `!todo clear`"
+        )
+
 
 # ══════════════════════════════════════════════════════════════
 # EVENTS
@@ -265,87 +479,12 @@ async def on_message(message):
 
     # ── TODO ──────────────────────────────────────────────────
     if text.lower().startswith(TODO_CMD):
-        parts   = text.split(" ", 2)
-        command = parts[1].lower() if len(parts) > 1 else "help"
+        await handle_todo(message, text)
+        return
 
-        if command == "list":
-            todos = await run_blocking(get_all_todos)
-            if isinstance(todos, dict) and "error" in todos:
-                await message.reply(f"❌ API error: {todos['error']}")
-                return
-            await message.reply(f"📋 **All Todos:**\n{format_todos(todos)}")
-
-        elif command == "pending":
-            todos = await run_blocking(get_pending_todos)
-            if isinstance(todos, dict) and "error" in todos:
-                await message.reply(f"❌ API error: {todos['error']}")
-                return
-            await message.reply(f"⏳ **Pending Todos:**\n{format_todos(todos)}")
-
-        elif command == "completed":
-            todos = await run_blocking(get_completed_todos)
-            if isinstance(todos, dict) and "error" in todos:
-                await message.reply(f"❌ API error: {todos['error']}")
-                return
-            await message.reply(f"✅ **Completed Todos:**\n{format_todos(todos)}")
-
-        elif command == "add":
-            if len(parts) >= 3 and parts[2].strip().lower() == "modal":
-                await message.reply("📝 Click the button to add a todo:", view=AddTodoView())
-                return
-            if len(parts) < 3 or not parts[2].strip():
-                await message.reply(
-                    "📝 To add a todo via modal, click the button below (or use `!todo add <title>`).",
-                    view=AddTodoView()
-                )
-                return
-            result = await run_blocking(add_todo, parts[2])
-            if isinstance(result, dict) and "error" in result:
-                await message.reply(f"❌ API error: {result['error']}")
-                return
-            await message.reply(f"✅ Added! `#{result['id']}` — {result['title']}")
-
-        elif command == "done":
-            if len(parts) < 3:
-                await message.reply("❌ Usage: `!todo done <id>`")
-                return
-            result = await run_blocking(mark_done, parts[2])
-            if isinstance(result, dict) and "error" in result:
-                await message.reply(f"❌ {result['error']}")
-                return
-            await message.reply(f"✅ Done! `#{result['id']}` — {result['title']}")
-
-        elif command == "undone":
-            if len(parts) < 3:
-                await message.reply("❌ Usage: `!todo undone <id>`")
-                return
-            result = await run_blocking(mark_undone, parts[2])
-            if isinstance(result, dict) and "error" in result:
-                await message.reply(f"❌ {result['error']}")
-                return
-            await message.reply(f"↩️ Undone! `#{result['id']}` — {result['title']}")
-
-        elif command == "delete":
-            if len(parts) < 3:
-                await message.reply("❌ Usage: `!todo delete <id>`")
-                return
-            result = await run_blocking(delete_todo, parts[2])
-            if isinstance(result, dict) and "error" in result:
-                await message.reply(f"❌ {result['error']}")
-                return
-            await message.reply(f"🗑️ {result['message']}")
-
-        elif command == "clear":
-            result = await run_blocking(clear_completed)
-            await message.reply(f"🧹 {result['message']}")
-
-        else:
-            await message.reply(
-                f"📋 **Todo Commands:**\n"
-                f"`!todo list` `!todo pending` `!todo completed`\n"
-                f"`!todo add <title>` `!todo done <id>`\n"
-                f"`!todo undone <id>` `!todo delete <id>` `!todo clear`"
-            )
+    # ── CALENDAR ──────────────────────────────────────────────
+    if text.lower().startswith(CAL_CMD):
+        await handle_calendar(message, text)
         return
 
     # ── GMAIL ─────────────────────────────────────────────────
