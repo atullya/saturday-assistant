@@ -47,6 +47,13 @@ PORTFOLIO_CMD  = "!portfolio"
 RENT_CMD       = "!rent"
 CAL_CMD        = "!cal"
 
+# ── Allowed user IDs ──────────────────────────────────────────
+OWNER_ID = os.getenv("OWNER_ID")
+ALLOWED_USERS = {int(OWNER_ID)} if OWNER_ID else set()
+
+def is_allowed(user_id: int) -> bool:
+    return user_id in ALLOWED_USERS
+
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
@@ -484,11 +491,17 @@ async def on_message(message):
 
     # ── CALENDAR ──────────────────────────────────────────────
     if text.lower().startswith(CAL_CMD):
+        if not is_allowed(message.author.id):
+            await message.reply("❌ Unauthorized. Only the owner can access calendar commands.")
+            return
         await handle_calendar(message, text)
         return
 
     # ── GMAIL ─────────────────────────────────────────────────
     if text.lower().startswith(GMAIL_CMD):
+        if not is_allowed(message.author.id):
+            await message.reply("❌ Unauthorized. Only the owner can access Gmail commands.")
+            return
         parts   = text.split(" ", 3)
         command = parts[1].lower() if len(parts) > 1 else "help"
 
