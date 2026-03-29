@@ -15,13 +15,39 @@ SCOPES = [
     'https://www.googleapis.com/auth/gmail.modify',
 ]
 
-BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
-CREDS_FILE   = os.path.join(BASE_DIR, 'credentials.json')
-TOKEN_FILE   = os.path.join(BASE_DIR, 'token.json')
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# candidate search order: service folder, repo root, current cwd, home
+def _find_file(filename):
+    paths = [
+        os.path.join(BASE_DIR, filename),
+        os.path.join(BASE_DIR, '..', filename),
+        os.path.join(BASE_DIR, '..', '..', filename),
+        os.path.join(os.getcwd(), filename),
+        os.path.join(os.path.expanduser('~'), filename),
+    ]
+    for p in paths:
+        p = os.path.abspath(p)
+        if os.path.exists(p):
+            return p
+    return os.path.abspath(os.path.join(BASE_DIR, filename))
+
+CREDS_FILE = _find_file('credentials.json')
+TOKEN_FILE = _find_file('token.json')
 
 # ── Connect to Gmail ──────────────────────────────────────────
 def get_gmail_service():
     creds = None
+
+    # ensure credentials file exists before starting OAuth flow
+    if not os.path.exists(CREDS_FILE):
+        raise FileNotFoundError(
+            f"Gmail credentials.json not found. Searched paths:\n"
+            f"  - {CREDS_FILE}\n"
+            f"  - {os.path.abspath(os.path.join(BASE_DIR, '..', 'credentials.json'))}\n"
+            f"  - {os.path.abspath(os.path.join(os.getcwd(), 'credentials.json'))}\n"
+            f"Please place credentials.json in the repository root or services/gmail/"
+        )
 
     # load existing token if available
     if os.path.exists(TOKEN_FILE):
@@ -226,23 +252,46 @@ def search_emails(query, max_results=5):
     except Exception as e:
         return [{"error": str(e)}]
 
-# ── Send email ────────────────────────────────────────────────
-def send_email(to, subject, body):
+# ── Send email with optional attachment ───────────────────────
+def send_email(to, subject, body, attachment_path=None):
     try:
         service = get_gmail_service()
 
         msg            = MIMEMultipart()
-        msg['To']      = to
+        msg['To']      = to.strip().lower()
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain'))
 
+        # attach file if provided
+        if attachment_path:
+            import mimetypes
+            from email.mime.base import MIMEBase
+            from email import encoders
+
+            if not os.path.exists(attachment_path):
+                return {"success": False, "error": f"File not found: {attachment_path}"}
+
+            mime_type, _ = mimetypes.guess_type(attachment_path)
+            mime_type    = mime_type or "application/octet-stream"
+            main, sub    = mime_type.split("/", 1)
+
+            with open(attachment_path, "rb") as f:
+                part = MIMEBase(main, sub)
+                part.set_payload(f.read())
+                encoders.encode_base64(part)
+                part.add_header(
+                    "Content-Disposition",
+                    f"attachment; filename={os.path.basename(attachment_path)}"
+                )
+                msg.attach(part)
+
         raw     = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-        message = service.users().messages().send(
+        result  = service.users().messages().send(
             userId='me',
             body={'raw': raw}
         ).execute()
 
-        return {"success": True, "id": message['id']}
+        return {"success": True, "id": result['id']}
 
     except Exception as e:
         return {"success": False, "error": str(e)}

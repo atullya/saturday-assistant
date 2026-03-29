@@ -1,23 +1,37 @@
 using Microsoft.EntityFrameworkCore;
 using TodoApi.Data;
 using TodoApi.Models;
+using TodoApi.Repositories;  // ← add this
 
 var builder = WebApplication.CreateBuilder(args);
+
+// ── Services ──────────────────────────────────────────────────
+builder.Services.AddControllers().AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.ReferenceHandler =
+            System.Text.Json.Serialization.ReferenceHandler.IgnoreCycles;
+    });
 
 // ── PostgreSQL ────────────────────────────────────────────────
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration
         .GetConnectionString("DefaultConnection")));
 
+// ── Rent Repository ───────────────────────────────────────────
+builder.Services.AddScoped<IRentRepository, RentRepository>();  // ← add this
+
 var app = builder.Build();
 
-// ── Auto create tables on startup ────────────────────────────
+// ── Auto migrate on startup ───────────────────────────────────
 using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider
                   .GetRequiredService<AppDbContext>();
-    db.Database.EnsureCreated();
+    db.Database.Migrate();  // ← changed from EnsureCreated to Migrate
 }
+
+// ── Map attribute-routed controllers (for Rent API) ───────────
+app.MapControllers();  // ← add this
 
 // ── GET all todos ─────────────────────────────────────────────
 app.MapGet("/api/todos", async (AppDbContext db) =>

@@ -28,6 +28,8 @@ TodoApi/bin/
 TodoApi/obj/
 TodoApi/*.db
 TodoApi/appsettings.Development.json
+TodoApi/appsettings.json
+
 
 # ── OS files ──────────────────────────────────────────────────
 .DS_Store

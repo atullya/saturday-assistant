@@ -1,140 +1,222 @@
 import discord
+from discord import app_commands
 import ollama
 import os
-import requests
-from bs4 import BeautifulSoup
+import socket
+import sys
+import time
+import asyncio
 from dotenv import load_dotenv
-from gmail_service import (
-    get_inbox,
-    get_unread,
-    read_email,
-    search_emails,
-    send_email
+
+try:
+    _lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    _lock_socket.bind(('127.0.0.1', 49132))
+except OSError:
+    print("Another instance is running. Waiting infinitely to prevent duplicate connections.")
+    while True: time.sleep(3600)
+
+from services.gmail.gmail_service import (
+    get_inbox, get_unread, read_email, search_emails, send_email
 )
+from services.rent.rent_service import handle_rent
+from services.todo.todo_service import (
+    get_all_todos, get_pending_todos, get_completed_todos,
+    add_todo, mark_done, mark_undone, delete_todo, clear_completed, format_todos
+)
+from services.portfolio.portfolio_service import (
+    get_portfolio_status, get_portfolio_links,
+    ask_portfolio_question, get_specific_portfolio
+)
+
 load_dotenv()
 
+PORTFOLIOS      = ["personal", "startup"]
 DISCORD_TOKEN   = os.getenv("DISCORD_TOKEN")
 OLLAMA_MODEL    = "llama3.2:1b"
 ASSISTANT_NAME  = "Saturday"
-API_BASE        = "http://localhost:5000/api/todos"
 
-# ── Command prefixes ──────────────────────────────────────────
-GMAIL_CMD = "!gmail"
+GMAIL_CMD       = "!gmail"
 TODO_CMD        = "!todo"
 SATURDAY_CMD    = "!saturday"
 SATURDAY_SHORT  = "!s"
 PORTFOLIO_CMD   = "!portfolio"
+RENT_CMD        = "!rent"
 
-# ── Portfolio links ───────────────────────────────────────────
-PORTFOLIOS = {
-    "personal"  : "https://portfolio.atullyamaharjan.com.np/",
-    "startup"   : "https://portfolio-startup.onrender.com/",
-}
-
-# ── Scrape portfolio text ─────────────────────────────────────
-def scrape_portfolio(url):
-    try:
-        res  = requests.get(url, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        # remove scripts and styles
-        for tag in soup(["script", "style", "nav", "footer"]):
-            tag.decompose()
-
-        text = soup.get_text(separator=" ", strip=True)
-
-        # keep it under 3000 chars so Ollama doesn't choke
-        return text[:3000]
-    except Exception as e:
-        return f"Error scraping: {e}"
-
-# ── Check if site is up ───────────────────────────────────────
-def check_site_status(url):
-    try:
-        res = requests.get(url, timeout=10)
-        return {
-            "up"      : True,
-            "status"  : res.status_code,
-            "time_ms" : int(res.elapsed.total_seconds() * 1000)
-        }
-    except requests.exceptions.ConnectionError:
-        return {"up": False, "status": "unreachable", "time_ms": 0}
-    except requests.exceptions.Timeout:
-        return {"up": False, "status": "timeout",     "time_ms": 0}
-    except Exception as e:
-        return {"up": False, "status": str(e),        "time_ms": 0}
-
-# ── Ask Ollama about portfolio content ────────────────────────
-def ask_about_portfolio(content, question):
-    try:
-        response = ollama.chat(
-            model=OLLAMA_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are Saturday, a personal assistant. "
-                        "Answer questions based ONLY on the portfolio content provided. "
-                        "Keep answers short — 2 to 3 sentences. "
-                        "If the answer is not in the content, say 'I could not find that in the portfolio.'"
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": f"Portfolio content:\n{content}\n\nQuestion: {question}"
-                }
-            ]
-        )
-        return response['message']['content']
-    except Exception as e:
-        return f"❌ Ollama error: {e}"
-
-# ── Helper: todo API calls ────────────────────────────────────
-def api_get(url):
-    try:
-        return requests.get(url).json()
-    except Exception as e:
-        return {"error": str(e)}
-
-def api_post(url, data):
-    try:
-        return requests.post(url, json=data).json()
-    except Exception as e:
-        return {"error": str(e)}
-
-def api_patch(url):
-    try:
-        return requests.patch(url).json()
-    except Exception as e:
-        return {"error": str(e)}
-
-def api_delete(url):
-    try:
-        return requests.delete(url).json()
-    except Exception as e:
-        return {"error": str(e)}
-
-# ── Format todos ──────────────────────────────────────────────
-def format_todos(todos):
-    if not todos:
-        return "📭 No todos found!"
-    lines = []
-    for t in todos:
-        status = "✅" if t["isCompleted"] else "⏳"
-        desc   = f" — {t['description']}" if t.get("description") else ""
-        lines.append(f"{status} `#{t['id']}` {t['title']}{desc}")
-    return "\n".join(lines)
-
-# ── On ready ──────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
+
+# ── Helper: run blocking calls in thread ──────────────────────
+async def run_blocking(func, *args):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, func, *args)
+
+# ══════════════════════════════════════════════════════════════
+# MODAL
+# ══════════════════════════════════════════════════════════════
+class TodoModal(discord.ui.Modal, title="Add Todo"):
+    def __init__(self):
+        super().__init__()
+        self.title_input = discord.ui.TextInput(
+            label="Todo title",
+            style=discord.TextStyle.short,
+            placeholder="Write your todo here",
+            required=True,
+            max_length=250
+        )
+        self.add_item(self.title_input)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception):
+        import traceback
+        print(f"❌ Modal error: {error}")
+        traceback.print_exc()
+        try:
+            await interaction.response.send_message(f"❌ Error: {error}", ephemeral=True)
+        except:
+            pass
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        title = self.children[0].value.strip()
+        print(f"DEBUG modal callback triggered, title='{title}'")
+
+        if not title:
+            await interaction.followup.send("❌ Title cannot be empty", ephemeral=True)
+            return
+
+        result = await run_blocking(add_todo, title)
+        print(f"DEBUG add_todo result: {result}")
+
+        if isinstance(result, dict) and "error" in result:
+            await interaction.followup.send(f"❌ API error: {result['error']}", ephemeral=True)
+            return
+
+        await interaction.followup.send(f"✅ Added! `#{result['id']}` — {result['title']}", ephemeral=True)
+
+class TestModal(discord.ui.Modal, title="Test Modal"):
+    def __init__(self):
+        super().__init__()
+        self.add_item(discord.ui.TextInput(label="Type anything"))
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.children[0].value
+        print(f"DEBUG TestModal got: '{value}'")
+        await interaction.response.send_message(f"✅ Got: {value}", ephemeral=True)
+
+class AddTodoView(discord.ui.View):
+    @discord.ui.button(label="Open Todo Modal", style=discord.ButtonStyle.primary)
+    async def open_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TodoModal())
+
+
+# ══════════════════════════════════════════════════════════════
+# SLASH COMMANDS
+# ══════════════════════════════════════════════════════════════
+tree = discord.app_commands.CommandTree(client)
+todo_group = discord.app_commands.Group(name="todo", description="Todo commands")
+
+@todo_group.command(name="list")
+async def todo_list(interaction: discord.Interaction):
+    await interaction.response.defer()
+    todos = await run_blocking(get_all_todos)
+    if isinstance(todos, dict) and "error" in todos:
+        await interaction.followup.send(f"❌ API error: {todos['error']}", ephemeral=True)
+        return
+    await interaction.followup.send(f"📋 **All Todos:**\n{format_todos(todos)}")
+
+@todo_group.command(name="pending")
+async def todo_pending(interaction: discord.Interaction):
+    await interaction.response.defer()
+    todos = await run_blocking(get_pending_todos)
+    if isinstance(todos, dict) and "error" in todos:
+        await interaction.followup.send(f"❌ API error: {todos['error']}", ephemeral=True)
+        return
+    await interaction.followup.send(f"⏳ **Pending Todos:**\n{format_todos(todos)}")
+
+@todo_group.command(name="completed")
+async def todo_completed(interaction: discord.Interaction):
+    await interaction.response.defer()
+    todos = await run_blocking(get_completed_todos)
+    if isinstance(todos, dict) and "error" in todos:
+        await interaction.followup.send(f"❌ API error: {todos['error']}", ephemeral=True)
+        return
+    await interaction.followup.send(f"✅ **Completed Todos:**\n{format_todos(todos)}")
+
+@todo_group.command(name="add")
+@app_commands.describe(title="Todo title (optional — leave blank for modal)")
+async def todo_add(interaction: discord.Interaction, title: str | None = None):
+    if not title or not title.strip():
+        await interaction.response.send_modal(TodoModal())
+        return
+    await interaction.response.defer()
+    try:
+        result = await run_blocking(add_todo, title.strip())
+        print(f"DEBUG add_todo result: {result}")
+        if isinstance(result, dict) and "error" in result:
+            await interaction.followup.send(f"❌ API error: {result['error']}", ephemeral=True)
+            return
+        await interaction.followup.send(f"✅ Added! `#{result['id']}` — {result['title']}")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Internal error: {e}", ephemeral=True)
+        raise
+
+@todo_group.command(name="modal")
+async def todo_modal(interaction: discord.Interaction):
+    try:
+        await interaction.response.send_modal(TodoModal())
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Could not open modal: {e}", ephemeral=True)
+
+@todo_group.command(name="test")
+async def todo_test(interaction: discord.Interaction):
+    await interaction.response.send_modal(TestModal())
+async def todo_test(interaction: discord.Interaction):
+    await interaction.response.send_modal(TestModal())
+
+@todo_group.command(name="done")
+async def todo_done(interaction: discord.Interaction, todo_id: str):
+    await interaction.response.defer()
+    result = await run_blocking(mark_done, todo_id)
+    if isinstance(result, dict) and "error" in result:
+        await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
+        return
+    await interaction.followup.send(f"✅ Done! `#{result['id']}` — {result['title']}")
+
+@todo_group.command(name="undone")
+async def todo_undone(interaction: discord.Interaction, todo_id: str):
+    await interaction.response.defer()
+    result = await run_blocking(mark_undone, todo_id)
+    if isinstance(result, dict) and "error" in result:
+        await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
+        return
+    await interaction.followup.send(f"↩️ Undone! `#{result['id']}` — {result['title']}")
+
+@todo_group.command(name="delete")
+async def todo_delete(interaction: discord.Interaction, todo_id: str):
+    await interaction.response.defer()
+    result = await run_blocking(delete_todo, todo_id)
+    if isinstance(result, dict) and "error" in result:
+        await interaction.followup.send(f"❌ {result['error']}", ephemeral=True)
+        return
+    await interaction.followup.send(f"🗑️ {result['message']}")
+
+@todo_group.command(name="clear")
+async def todo_clear(interaction: discord.Interaction):
+    await interaction.response.defer()
+    result = await run_blocking(clear_completed)
+    await interaction.followup.send(f"🧹 {result['message']}")
+
+tree.add_command(todo_group)
+
+# ══════════════════════════════════════════════════════════════
+# EVENTS
+# ══════════════════════════════════════════════════════════════
 @client.event
 async def on_ready():
+    await tree.sync()
     print(f"✅ {ASSISTANT_NAME} is online as {client.user}")
 
-
-# ── On message ────────────────────────────────────────────────
 @client.event
 async def on_message(message):
     if message.author == client.user:
@@ -142,63 +224,30 @@ async def on_message(message):
 
     text = message.content.strip()
 
-    # ══════════════════════════════════════════════════════════
-    # PORTFOLIO COMMANDS
-    # ══════════════════════════════════════════════════════════
+    # ── RENT ──────────────────────────────────────────────────
+    if text.lower().startswith(RENT_CMD):
+        await handle_rent(message, text)
+        return
+
+    # ── PORTFOLIO ─────────────────────────────────────────────
     if text.lower().startswith(PORTFOLIO_CMD):
         parts   = text.split(" ", 2)
         command = parts[1].lower() if len(parts) > 1 else "help"
 
-        # !portfolio status
         if command == "status":
-            lines = ["🌐 **Portfolio Status:**\n"]
-            for name, url in PORTFOLIOS.items():
-                s = check_site_status(url)
-                if s["up"]:
-                    lines.append(f"✅ **{name}** — UP `{s['time_ms']}ms`\n🔗 {url}")
-                else:
-                    lines.append(f"❌ **{name}** — DOWN `{s['status']}`\n🔗 {url}")
-            await message.reply("\n".join(lines))
-
-        # !portfolio links
+            await message.reply(await run_blocking(get_portfolio_status))
         elif command == "links":
-            lines = ["🔗 **My Portfolios:**\n"]
-            for name, url in PORTFOLIOS.items():
-                lines.append(f"**{name.capitalize()}** → {url}")
-            await message.reply("\n".join(lines))
-
-        # !portfolio ask what projects have you built
+            await message.reply(await run_blocking(get_portfolio_links))
         elif command == "ask":
             if len(parts) < 3:
                 await message.reply("❌ Usage: `!portfolio ask <your question>`")
                 return
-
-            question = parts[2]
             await message.reply("🔍 Scraping portfolio and thinking... please wait!")
-
             async with message.channel.typing():
-                # scrape both portfolios and combine
-                combined_content = ""
-                for name, url in PORTFOLIOS.items():
-                    content = scrape_portfolio(url)
-                    combined_content += f"\n\n--- {name} portfolio ---\n{content}"
-
-                reply = ask_about_portfolio(combined_content, question)
-
+                reply = await run_blocking(ask_portfolio_question, parts[2])
             await message.reply(f"🤖 **Saturday:** {reply}")
-
-        # !portfolio personal  or  !portfolio startup
         elif command in PORTFOLIOS:
-            url = PORTFOLIOS[command]
-            s   = check_site_status(url)
-            status_text = f"✅ UP `{s['time_ms']}ms`" if s["up"] else f"❌ DOWN"
-            await message.reply(
-                f"🔗 **{command.capitalize()} Portfolio**\n"
-                f"{url}\n"
-                f"Status: {status_text}"
-            )
-
-        # !portfolio help
+            await message.reply(await run_blocking(get_specific_portfolio, command))
         else:
             await message.reply(
                 f"🌐 **Saturday Portfolio Commands:**\n\n"
@@ -214,40 +263,44 @@ async def on_message(message):
             )
         return
 
-    # ══════════════════════════════════════════════════════════
-    # TODO COMMANDS
-    # ══════════════════════════════════════════════════════════
+    # ── TODO ──────────────────────────────────────────────────
     if text.lower().startswith(TODO_CMD):
         parts   = text.split(" ", 2)
         command = parts[1].lower() if len(parts) > 1 else "help"
 
         if command == "list":
-            todos = api_get(API_BASE)
-            if "error" in todos:
+            todos = await run_blocking(get_all_todos)
+            if isinstance(todos, dict) and "error" in todos:
                 await message.reply(f"❌ API error: {todos['error']}")
                 return
             await message.reply(f"📋 **All Todos:**\n{format_todos(todos)}")
 
         elif command == "pending":
-            todos = api_get(f"{API_BASE}/pending")
-            if "error" in todos:
+            todos = await run_blocking(get_pending_todos)
+            if isinstance(todos, dict) and "error" in todos:
                 await message.reply(f"❌ API error: {todos['error']}")
                 return
             await message.reply(f"⏳ **Pending Todos:**\n{format_todos(todos)}")
 
         elif command == "completed":
-            todos = api_get(f"{API_BASE}/completed")
-            if "error" in todos:
+            todos = await run_blocking(get_completed_todos)
+            if isinstance(todos, dict) and "error" in todos:
                 await message.reply(f"❌ API error: {todos['error']}")
                 return
             await message.reply(f"✅ **Completed Todos:**\n{format_todos(todos)}")
 
         elif command == "add":
-            if len(parts) < 3:
-                await message.reply("❌ Usage: `!todo add your task title`")
+            if len(parts) >= 3 and parts[2].strip().lower() == "modal":
+                await message.reply("📝 Click the button to add a todo:", view=AddTodoView())
                 return
-            result = api_post(API_BASE, {"title": parts[2]})
-            if "error" in result:
+            if len(parts) < 3 or not parts[2].strip():
+                await message.reply(
+                    "📝 To add a todo via modal, click the button below (or use `!todo add <title>`).",
+                    view=AddTodoView()
+                )
+                return
+            result = await run_blocking(add_todo, parts[2])
+            if isinstance(result, dict) and "error" in result:
                 await message.reply(f"❌ API error: {result['error']}")
                 return
             await message.reply(f"✅ Added! `#{result['id']}` — {result['title']}")
@@ -256,34 +309,34 @@ async def on_message(message):
             if len(parts) < 3:
                 await message.reply("❌ Usage: `!todo done <id>`")
                 return
-            try:
-                result = api_patch(f"{API_BASE}/{int(parts[2])}/done")
-                await message.reply(f"✅ Done! `#{result['id']}` — {result['title']}")
-            except ValueError:
-                await message.reply("❌ ID must be a number.")
+            result = await run_blocking(mark_done, parts[2])
+            if isinstance(result, dict) and "error" in result:
+                await message.reply(f"❌ {result['error']}")
+                return
+            await message.reply(f"✅ Done! `#{result['id']}` — {result['title']}")
 
         elif command == "undone":
             if len(parts) < 3:
                 await message.reply("❌ Usage: `!todo undone <id>`")
                 return
-            try:
-                result = api_patch(f"{API_BASE}/{int(parts[2])}/undone")
-                await message.reply(f"↩️ Undone! `#{result['id']}` — {result['title']}")
-            except ValueError:
-                await message.reply("❌ ID must be a number.")
+            result = await run_blocking(mark_undone, parts[2])
+            if isinstance(result, dict) and "error" in result:
+                await message.reply(f"❌ {result['error']}")
+                return
+            await message.reply(f"↩️ Undone! `#{result['id']}` — {result['title']}")
 
         elif command == "delete":
             if len(parts) < 3:
                 await message.reply("❌ Usage: `!todo delete <id>`")
                 return
-            try:
-                result = api_delete(f"{API_BASE}/{int(parts[2])}")
-                await message.reply(f"🗑️ {result['message']}")
-            except ValueError:
-                await message.reply("❌ ID must be a number.")
+            result = await run_blocking(delete_todo, parts[2])
+            if isinstance(result, dict) and "error" in result:
+                await message.reply(f"❌ {result['error']}")
+                return
+            await message.reply(f"🗑️ {result['message']}")
 
         elif command == "clear":
-            result = api_delete(f"{API_BASE}/completed")
+            result = await run_blocking(clear_completed)
             await message.reply(f"🧹 {result['message']}")
 
         else:
@@ -295,18 +348,14 @@ async def on_message(message):
             )
         return
 
-
-        # ══════════════════════════════════════════════════════════
-    # GMAIL COMMANDS
-    # ══════════════════════════════════════════════════════════
+    # ── GMAIL ─────────────────────────────────────────────────
     if text.lower().startswith(GMAIL_CMD):
         parts   = text.split(" ", 3)
         command = parts[1].lower() if len(parts) > 1 else "help"
 
-        # !gmail inbox
         if command == "inbox":
             await message.reply("📬 Fetching inbox...")
-            emails = get_inbox(5)
+            emails = await run_blocking(get_inbox, 5)
             if not emails:
                 await message.reply("📭 Inbox is empty!")
                 return
@@ -316,16 +365,12 @@ async def on_message(message):
             lines = ["📬 **Latest 5 Emails:**\n"]
             for i, e in enumerate(emails, 1):
                 unread = "🔵" if e['unread'] else "⚪"
-                lines.append(
-                    f"{unread} `#{i}` **{e['subject']}**\n"
-                    f"      From: {e['from']}\n"
-                )
+                lines.append(f"{unread} `#{i}` **{e['subject']}**\n      From: {e['from']}\n")
             await message.reply("\n".join(lines))
 
-        # !gmail unread
         elif command == "unread":
             await message.reply("🔵 Fetching unread emails...")
-            emails = get_unread(5)
+            emails = await run_blocking(get_unread, 5)
             if not emails:
                 await message.reply("✅ No unread emails!")
                 return
@@ -334,13 +379,9 @@ async def on_message(message):
                 return
             lines = [f"🔵 **{len(emails)} Unread Emails:**\n"]
             for i, e in enumerate(emails, 1):
-                lines.append(
-                    f"`#{i}` **{e['subject']}**\n"
-                    f"      From: {e['from']}\n"
-                )
+                lines.append(f"`#{i}` **{e['subject']}**\n      From: {e['from']}\n")
             await message.reply("\n".join(lines))
 
-        # !gmail read 1
         elif command == "read":
             if len(parts) < 3:
                 await message.reply("❌ Usage: `!gmail read <number>`")
@@ -351,7 +392,7 @@ async def on_message(message):
                 await message.reply("❌ Number must be an integer. Example: `!gmail read 1`")
                 return
             await message.reply(f"📖 Reading email #{index}...")
-            e = read_email(index)
+            e = await run_blocking(read_email, index)
             if "error" in e:
                 await message.reply(f"❌ Error: {e['error']}")
                 return
@@ -364,14 +405,13 @@ async def on_message(message):
                 f"{e['body'][:1000]}"
             )
 
-        # !gmail search python
         elif command == "search":
             if len(parts) < 3:
                 await message.reply("❌ Usage: `!gmail search <keyword>`")
                 return
-            query  = parts[2]
+            query = parts[2]
             await message.reply(f"🔍 Searching emails for `{query}`...")
-            emails = search_emails(query, 5)
+            emails = await run_blocking(search_emails, query, 5)
             if not emails:
                 await message.reply(f"📭 No emails found for `{query}`")
                 return
@@ -380,54 +420,72 @@ async def on_message(message):
                 return
             lines = [f"🔍 **Search results for '{query}':**\n"]
             for i, e in enumerate(emails, 1):
-                lines.append(
-                    f"`#{i}` **{e['subject']}**\n"
-                    f"      From: {e['from']}\n"
-                )
+                lines.append(f"`#{i}` **{e['subject']}**\n      From: {e['from']}\n")
             await message.reply("\n".join(lines))
 
-        # !gmail send to@gmail.com Subject :: Body
         elif command == "send":
-            # format: !gmail send to@email.com Subject here :: Body here
-            if len(parts) < 3:
+            full = message.content.strip()
+            print(f"DEBUG send command: '{full}'")
+            try:
+                after_cmd = full[len("!gmail send"):].strip()
+                if "::" not in after_cmd:
+                    await message.reply(
+                        "❌ Format: `!gmail send email@gmail.com Subject :: Body`\n"
+                        "Example: `!gmail send friend@gmail.com Hello :: How are you?`"
+                    )
+                    return
+                before_body, body = after_cmd.split("::", 1)
+                body        = body.strip()
+                before_body = before_body.strip()
+                space_idx   = before_body.index(" ")
+                to          = before_body[:space_idx].strip()
+                subject     = before_body[space_idx:].strip()
+                print(f"DEBUG to='{to}' subject='{subject}' body='{body}'")
+                if "@" not in to or "." not in to:
+                    await message.reply(f"❌ Invalid email address: `{to}`")
+                    return
+                if not subject:
+                    await message.reply("❌ Subject cannot be empty")
+                    return
+                if not body:
+                    await message.reply("❌ Body cannot be empty")
+                    return
+            except Exception as e:
                 await message.reply(
-                    "❌ Usage: `!gmail send to@email.com Subject :: Body`\n"
-                    "Example: `!gmail send friend@gmail.com Hello there :: Hey how are you?`"
+                    f"❌ Could not parse command: {e}\n"
+                    f"Format: `!gmail send email@gmail.com Subject :: Body`"
                 )
                 return
-            rest = text[len(GMAIL_CMD) + len(" send "):].strip()
-            if "::" not in rest:
-                await message.reply(
-                    "❌ Separate subject and body with `::`\n"
-                    "Example: `!gmail send friend@gmail.com Hello :: How are you?`"
-                )
-                return
-            # parse:  to@email.com Subject :: Body
-            to_and_subject, body = rest.split("::", 1)
-            to_parts = to_and_subject.strip().split(" ", 1)
-            if len(to_parts) < 2:
-                await message.reply("❌ Format: `!gmail send email@gmail.com Subject :: Body`")
-                return
-            to      = to_parts[0].strip()
-            subject = to_parts[1].strip()
-            body    = body.strip()
 
-            await message.reply(f"📤 Sending email to `{to}`...")
-            result = send_email(to, subject, body)
+            attachment_path = None
+            if message.attachments:
+                attachment      = message.attachments[0]
+                attachment_path = f"/tmp/{attachment.filename}"
+                await message.reply(f"📎 Downloading `{attachment.filename}`...")
+                file_data = await attachment.read()
+                with open(attachment_path, "wb") as f:
+                    f.write(file_data)
+
+            await message.reply(f"📤 Sending to `{to}`...")
+            result = await run_blocking(send_email, to, subject, body, attachment_path)
+
+            if attachment_path and os.path.exists(attachment_path):
+                os.remove(attachment_path)
+
             if result['success']:
-                await message.reply(f"✅ Email sent to `{to}`!")
+                msg_type = "with attachment!" if attachment_path else "successfully!"
+                await message.reply(f"✅ Email sent to `{to}` {msg_type}")
             else:
                 await message.reply(f"❌ Failed: {result['error']}")
 
-        # !gmail help
         else:
             await message.reply(
                 f"📧 **Saturday Gmail Commands:**\n\n"
-                f"`!gmail inbox`                    — latest 5 emails\n"
-                f"`!gmail unread`                   — unread emails\n"
-                f"`!gmail read <number>`             — read full email\n"
-                f"`!gmail search <keyword>`          — search emails\n"
-                f"`!gmail send email subject :: body` — send email\n\n"
+                f"`!gmail inbox`                      — latest 5 emails\n"
+                f"`!gmail unread`                     — unread emails\n"
+                f"`!gmail read <number>`              — read full email\n"
+                f"`!gmail search <keyword>`           — search emails\n"
+                f"`!gmail send email subject :: body`  — send email\n\n"
                 f"**Examples:**\n"
                 f"`!gmail read 1`\n"
                 f"`!gmail search invoice`\n"
@@ -435,9 +493,7 @@ async def on_message(message):
             )
         return
 
-    # ══════════════════════════════════════════════════════════
-    # SATURDAY AI COMMANDS
-    # ══════════════════════════════════════════════════════════
+    # ── SATURDAY AI ───────────────────────────────────────────
     if not text.lower().startswith((SATURDAY_CMD, SATURDAY_SHORT)):
         return
 
@@ -456,21 +512,20 @@ async def on_message(message):
 
     async with message.channel.typing():
         try:
-            response = ollama.chat(
-                model=OLLAMA_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            f"You are {ASSISTANT_NAME}, a helpful personal assistant. "
-                            "Keep answers short — max 3 sentences."
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": question
-                    }
-                ]
+            response = await run_blocking(
+                lambda: ollama.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                f"You are {ASSISTANT_NAME}, a helpful personal assistant. "
+                                "Keep answers short — max 3 sentences."
+                            )
+                        },
+                        {"role": "user", "content": question}
+                    ]
+                )
             )
             reply = response['message']['content']
         except Exception as e:
