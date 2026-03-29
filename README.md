@@ -1,83 +1,85 @@
-# Automation Project
+# Saturday: The Ultimate Automation Assistant
 
-This project contains a Discord bot with various automation features, including Gmail integration, todo management, rent tracking, portfolio monitoring, and AI chat capabilities.
-
-## Project Structure
-
-```
-automation/
-├── services/                    # Modular services for different features
-│   ├── gmail/
-│   │   ├── __init__.py
-│   │   └── gmail_service.py     # Gmail API integration
-│   ├── rent/
-│   │   ├── __init__.py
-│   │   └── rent_service.py      # Rent management commands
-│   ├── todo/
-│   │   ├── __init__.py
-│   │   └── todo_service.py      # Todo API interactions
-│   └── portfolio/
-│       ├── __init__.py
-│       └── portfolio_service.py # Portfolio scraping and analysis
-├── utils/                       # Utility scripts
-│   └── assistant.py              # Voice assistant using Whisper and Ollama
-├── TodoApi/                     # ASP.NET Core API for todo and rent management
-├── discord_bot.py               # Main Discord bot
-├── credentials.json             # Gmail API credentials
-├── token.json                   # Gmail API token
-└── README.md
-```
+Saturday is a comprehensive, multi-modal Discord bot and voice assistant designed to streamline daily tasks, manage technical operations, and provide unified automation across multiple services. Built with a modular Python architecture and a robust ASP.NET Core API backend, Saturday acts as a central hub for personal and professional productivity.
 
 ## Features
 
-### Discord Bot Commands
+### Core Assistant Capabilities
+- **Advanced AI Chat**: Seamless conversational capabilities powered by local Ollama models (`!saturday` or `!s`).
+- **Voice Operations**: Wake word detection ("Hey Saturday" / "Hey Jarvis"), speech-to-text via Whisper, and TTS using pyttsx3.
 
-- `!gmail` - Gmail operations (inbox, unread, read, search, send)
-- `!todo` - Todo management (list, add, done, delete, etc.)
-- `!rent` - Rent tracking (tenants, bills, payments, dues)
-- `!portfolio` - Portfolio monitoring (status, links, ask questions)
-- `!saturday` or `!s` - AI chat using Ollama
+### Google Integration (Gmail & Calendar)
+*Note: These commands are protected and restricted to the `OWNER_ID` defined in the environment.*
+- **Calendar Management**: View upcoming events, check today's schedule, and create or delete events directly from Discord (`!cal` / `/cal`).
+- **Gmail Operations**: Read your inbox, check unread messages, search threads, and send emails with attachments directly through Discord (`!gmail`).
 
-### Voice Assistant
+###  Task & Rent Management
+- **Todo System**: Full CRUD management for tasks (`!todo` / `/todo`), including a streamlined interactive modal for quick entries.
+- **Rent Tracking**: Manage tenants, track bills, process payments, and calculate dues in real-time (`!rent`).
 
-- Wake word detection ("Hey Saturday" or "Hey Jarvis")
-- Speech-to-text using Whisper
-- AI responses using Ollama
-- Text-to-speech using pyttsx3
+### Portfolio Monitoring
+- **Live Status**: Check the uptime and status of personal and startup portfolios.
+- **Interactive Q&A**: Scrape your live portfolio and ask Saturday AI queries about your projects, skills, or experience (`!portfolio`).
 
-### TodoApi
+## Project Architecture
 
-- REST API for managing todos, tenants, bills, and payments
-- Built with ASP.NET Core and Entity Framework
-
-## Setup
-
-1. Install dependencies for Python and .NET
-2. Set up Gmail API credentials
-3. Configure environment variables (DISCORD_TOKEN, etc.)
-4. Run the TodoApi: `dotnet run` in TodoApi directory
-5. Run the Discord bot: `python discord_bot.py`
-6. Run the voice assistant: `python utils/assistant.py`
-
-## Environment Variables
-
-Create a `.env` file with:
-
-```
-DISCORD_TOKEN=your_discord_bot_token
+```text
+automation/
+├── services/                    # Core micro-services
+│   ├── calendar/                # Google Calendar API integration
+│   ├── gmail/                   # Google Gmail API operations
+│   ├── rent/                    # Tenant and rent calculation logic
+│   ├── todo/                    # To-Do list processing
+│   └── portfolio/               # Portfolio scraping and AI QA
+├── utils/                       # Shared utilities (logging, voice assistant)
+├── TodoApi/                     # ASP.NET Core Entity Framework REST API
+├── discord_bot.py               # Main Discord Gateway client
+├── credentials.json             # Google OAuth2 App Credentials
+├── token.json                   # Google OAuth2 Authorized Token
+└── .env                         # Environment configuration
 ```
 
-## Gmail Setup
+##  Setup & Deployment
 
-1. Enable Gmail API in Google Cloud Console
-2. Download credentials.json
-3. First run will prompt for authentication
+### 1. Prerequisites
+- Python 3.10+
+- .NET 8.0+ SDK (for TodoApi)
+- An active Discord Bot Token
+- Google Cloud Console project with **Gmail API** and **Google Calendar API** enabled.
 
-## API Endpoints
+### 2. Environment Configuration
+Create a `.env` file in the root directory:
+```env
+DISCORD_TOKEN=your_discord_bot_token_here
+OWNER_ID=your_discord_user_id_here
+```
+*(The `OWNER_ID` is used to restrict sensitive commands like Gmail and Calendar to the bot owner).*
 
-The TodoApi runs on `http://localhost:5000` with endpoints for:
+### 3. Google API Setup
+1. Download your `credentials.json` from the Google Cloud Console.
+2. Place it in the root directory.
+3. On the first run, the script will open a local web server to authenticate your Google Account and generate `token.json` automatically.
 
-- `/api/todos` - Todo management
-- `/api/tenants` - Tenant management
-- `/api/bills` - Bill management
-- `/api/payments` - Payment tracking
+### 4. Running the Assistant
+You need to run the backend API, the Discord bot, and the voice assistant concurrently:
+
+**Terminal 1: ASP.NET Core API**
+```bash
+cd TodoApi
+dotnet run
+```
+*API endpoints will be available at `http://localhost:5000` (`/api/todos`, `/api/tenants`, `/api/bills`, `/api/payments`).*
+
+**Terminal 2: Discord Bot**
+```bash
+python discord_bot.py
+```
+
+**Terminal 3: Voice Assistant**
+```bash
+python utils/assistant.py
+```
+
+##  Security & Privacy
+- **Owner-Only Commands**: Sensitive endpoints integrating with personal Google accounts (`!gmail`, `!cal`) gracefully block unauthorized Discord users.
+- **Single Instance Lock**: The Discord bot runs an internal socket lock to prevent multiple supervised processes from running simultaneously and duplicating interaction acknowledgements.
