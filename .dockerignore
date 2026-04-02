@@ -1,0 +1,7 @@
+.git
+.vs
+TodoApi/
+whisper-env/
+__pycache__/
+*.pyc
+.env

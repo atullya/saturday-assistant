@@ -1,0 +1,23 @@
+services:
+  api:
+    build:
+      context: ./TodoApi
+      dockerfile: Dockerfile
+    network_mode: "host"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    network_mode: "host"
+    environment:
+      - RENT_API_BASE=http://localhost:5000/api
+      - TODO_API_BASE=http://localhost:5000/api/todos
+    depends_on:
+      - api
+    restart: unless-stopped
+    env_file:
+      - .env

@@ -150,4 +150,4 @@ app.MapDelete("/api/todos/completed", async (AppDbContext db) =>
     return Results.Ok(new { message = $"Deleted {completed.Count} completed todos" });
 });
 
-app.Run("http://localhost:5000");
+app.Run("http://0.0.0.0:5000");

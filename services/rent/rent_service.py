@@ -1,7 +1,8 @@
 import requests
+import os
 from datetime import datetime
 
-RENT_API = "http://localhost:5000/api"
+RENT_API = os.getenv("RENT_API_BASE", "http://localhost:5000/api")
 
 async def handle_rent(message, text):
     parts  = text.strip().split()

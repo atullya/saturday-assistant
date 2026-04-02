@@ -9,7 +9,7 @@ from utils.logger import get_endpoint_logger
 
 api_logger = get_endpoint_logger("todo_api")
 
-API_BASE = "http://localhost:5000/api/todos"
+API_BASE = os.getenv("TODO_API_BASE", "http://localhost:5000/api/todos")
 
 # ── Helper: todo API calls ───────────────────────────────────
 def api_get(url):
